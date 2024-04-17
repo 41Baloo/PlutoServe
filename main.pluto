@@ -1,0 +1,78 @@
+require("plutoServe/plutoServe")
+
+local router = new Router(80)
+
+-- will match "/hi" but not "/hi?arg1=true"
+router:addRoute("/hi", function(req)
+
+    -- inline, every request gets assigned a response that can be sent
+    req.response:setString("Hello :D"):setContentType("text/plain"):sendResponse()
+end)
+
+-- will match "/hi" AND "/hi?arg1=true" but due to priority "/hi" will be handled by the first route instead
+router:addRoute("/hi", function(req)
+    req.response:setString($"Hi, Your Query Is: {req:getQueryString()}"):setContentType("text/plain"):sendResponse()
+end, true)
+
+router:addRoute("/hello", function(req)
+
+    -- instead of inline, you can just create a new response
+    local response = new Response(req.s, "Hi :D")
+    response:sendResponse()
+end)
+
+router:addRoute("/debug", function(req)
+    req.response:setString($"Version: {req:getVersion()}\nType: {req:getType()}\nHost: {req:getHost()}\n\nPath: {req:getPath()}\nQuery: {req:getQueryString()}\nUser-Agent: {req:getUseragent()}")
+    :setContentType("text/plain"):sendResponse()
+end, true)
+
+router:addRoute("/redirect", function(req)
+
+    -- get value of a specifc query key
+    local targetUrl = req:getQueryValue("target")
+
+    if targetUrl == nil then
+        return req.response:setString("Specify your target like this: /redirect?target=example.com")
+        :setContentType("text/plain"):sendResponse()
+    end
+
+    -- set different status codes & headers
+    req.response:setStatus("307 Temporary Redirect")
+        :setHeader("location", targetUrl)
+        :sendResponse()
+end, true)
+
+-- gets called for every request
+router:addMiddleware(function(req)
+    print($"{os.date("%c")}: {req:getPath()} - {req:getUseragent()}") -- log path and useragent of every request
+end)
+
+-- function to be called when no matching route was found
+router:setFallback(function(req)
+    print($"{os.date("%c")}: /!\\ \"{req:getPath()}\" was requested but not found! /!\\") -- additional logging for requests that didnt match any routes
+
+    req.response:setContentType("text/plain")
+        :setString($"No Route Found For \"{req:getPath()}\" :["):setStatus("404 NOT_FOUND")
+        :sendResponse()
+end)
+
+-- list all available routes
+router:addRoute("/", function(req)
+    local content = "Available Routes (strict):\n"
+
+    for routeString in router:getRoutes() do
+        content ..= $"\t- {routeString}\n"
+    end
+
+    content ..= "\nAvailable Routes: (slack)\n"
+
+    for routeString in router:getslackRoutes() do
+        content ..= $"\t- {routeString}\n"
+    end
+
+    req.response:setContentType("text/plain")
+        :setString(content)
+        :sendResponse()
+end, true)
+
+router:startListening()

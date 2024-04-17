@@ -1,0 +1,190 @@
+local { scheduler, socket } = require "*"
+
+enum MIDDLEWARE_CODE begin
+    MIDDLEWARE_CONTINUE = 0,
+    MIDDLEWARE_ERROR,
+    MIDDLEWARE_END
+end
+
+enum ROUTE_CODE begin
+    ROUTE_CONTINUE = 0,
+    ROUTE_ERROR,
+    ROUTE_END
+end
+
+class Response
+
+    private contentType: string = nil
+    private headers: table = {}
+
+    function __construct(private s: userdata, private response: string, private status: string = "200 OK")
+    end
+
+    function setString(response: string): userdata
+        self.response = response
+        return self
+    end
+
+    function setStatus(status: string): userdata
+        self.status = status
+        return self
+    end
+
+    function setContentType(contentType: string): userdata
+        self.headers["Content-Type"] = contentType
+        return self
+    end
+
+    function setHeader(header: string, value: string): userdata
+        self.headers[header] = value
+        return self
+    end
+
+    function sendResponse()
+
+        local headers = ""
+        for header, value in self.headers do
+            headers ..= $"{header}: {value}\r\n"
+        end
+
+        local responseString = $"HTTP/1.1 {self.status}\r\nConnection: Close\r\n{headers}Content-Length: {#self.response}\r\n\r\n"..self.response;
+        self.s:send(responseString)
+    end
+end
+
+class Request
+    public type: string
+    public path: string
+    public version: string
+    public headers: table = {}
+    public response: userdata
+
+    function __construct(public s: userdata)
+        self.response = new Response(self.s, "")
+        local lines = self.s:recv():split('\n')
+        local essentials = lines[1]:split(' ')
+        lines[1] = nil
+
+        self.type = essentials[1]
+        self.path = essentials[2]
+        self.version = essentials[3]
+
+        for lines as line do
+            local keyVal = line:split(': ')
+            self.headers[keyVal[1]] = keyVal[2]
+        end
+    end
+
+    function getType(): string
+        return self.type
+    end
+
+    function getPath(): string
+        return self.path
+    end
+
+    function getCleanPath(): string
+        return self.path:split('?')[1]
+    end
+
+    function getQueryString(): string
+        local pos = self.path:find('?')
+        return pos == nil ? "" : self.path:sub(pos + 1)
+    end
+
+    function getQueryValue(key: string): ?string
+        for keyValue in string.gmatch(self:getQueryString(), "[^&]+") do
+            local eqPos = string.find(keyValue, "=")
+            
+            if eqPos then
+                if key != string.sub(keyValue, 1, eqPos - 1) then continue end
+                return string.sub(keyValue, eqPos + 1)
+            end
+        end
+
+        return nil
+    end
+      
+
+    function getVersion(): string
+        return self.version
+    end
+
+    function getHost(): ?string
+        return self.headers["Host"]
+    end
+
+    function getUseragent(): ?string
+        return self.headers["User-Agent"]
+    end
+
+    function getResponse(): userdata
+        return self.response
+    end
+end
+
+class Router
+    private routes: table = {}
+    private slackRoutes: table = {}
+    private middleware: table = {}
+    private fallback: function = function(req)
+        req.response:setContentType("text/plain")
+        :setString($"No Route Found For \"{req:getPath()}\""):setStatus("404 NOT_FOUND")
+        :sendResponse()
+    end
+
+    function __construct(public port: int = 80, public sched = new scheduler())
+        socket.bind(sched, self.port, |s| -> do
+            local request = new Request(s)
+
+            for self.middleware as middleware do
+                if middleware(request) == MIDDLEWARE_END then return end
+            end
+
+            local route = self.routes[request:getPath()]
+            if route != nil then
+                if route(request) != ROUTE_CONTINUE then return end
+            end
+
+            local queryRoute = self.slackRoutes[request:getCleanPath()]
+            if queryRoute != nil then
+                if queryRoute(request) != ROUTE_CONTINUE then return end
+            end
+
+            self.fallback(request)
+        end)
+    end
+
+    function addMiddleware(fn: function)
+        table.insert(self.middleware, fn)
+    end
+
+    function getMiddleware()
+        return self.middleware
+    end
+
+    function addRoute(route: string, fn: function, slackRoute: bool = false)
+        if slackRoute then
+            self.slackRoutes[route] = fn
+        else
+            self.routes[route] = fn
+        end
+    end
+
+    function getRoutes()
+        return self.routes
+    end
+
+    function getslackRoutes()
+        return self.slackRoutes
+    end
+
+    function setFallback(fn: function)
+        self.fallback = fn
+    end
+
+    function startListening()
+        self.sched:run()
+    end
+
+end
